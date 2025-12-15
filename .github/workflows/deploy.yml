@@ -1,0 +1,152 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-1
+  TERRAFORM_VERSION: 1.5.0
+
+jobs:
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package Lambda
+        run: |
+          cd lambda
+          zip -r lambda.zip app.py
+          LAMBDA_HASH=$(openssl dgst -sha256 -binary lambda.zip | base64)
+          echo "LAMBDA_PACKAGE_HASH=$LAMBDA_HASH" >> $GITHUB_ENV
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        working-directory: project
+        run: terraform init
+
+      - name: Select Staging Workspace
+        working-directory: project
+        run: |
+          terraform workspace select staging || terraform workspace new staging
+
+      - name: Terraform Apply
+        working-directory: project
+        run: terraform apply -auto-approve -var-file="staging.tfvars" -var="lambda_package_hash=${LAMBDA_PACKAGE_HASH}"
+
+
+  plan-production:
+    name: Plan Production Deployment
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package Lambda
+        run: |
+          cd lambda
+          zip -r lambda.zip app.py
+          LAMBDA_HASH=$(openssl dgst -sha256 -binary lambda.zip | base64)
+          echo "LAMBDA_PACKAGE_HASH=$LAMBDA_HASH" >> $GITHUB_ENV
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        working-directory: project
+        run: terraform init
+
+      - name: Select Production Workspace
+        working-directory: project
+        run: |
+          terraform workspace select production || terraform workspace new production
+
+      - name: Terraform Plan
+        working-directory: project
+        run: terraform plan -var-file="prod.tfvars" -var="lambda_package_hash=${LAMBDA_PACKAGE_HASH}" -out=tfplan
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: project/tfplan
+          retention-days: 1
+
+
+  apply-production:
+    name: Apply Production Deployment
+    needs: plan-production
+    runs-on: ubuntu-latest
+    environment:
+      name: production  
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package Lambda
+        run: |
+          cd lambda
+          zip -r lambda.zip app.py
+          LAMBDA_HASH=$(openssl dgst -sha256 -binary lambda.zip | base64)
+          echo "LAMBDA_PACKAGE_HASH=$LAMBDA_HASH" >> $GITHUB_ENV
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        working-directory: project
+        run: terraform init
+
+      - name: Select Production Workspace
+        working-directory: project
+        run: terraform workspace select production  || terraform workspace new production
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: project/
+
+      - name: Terraform Apply
+        working-directory: project
+        run: terraform apply -auto-approve tfplan
